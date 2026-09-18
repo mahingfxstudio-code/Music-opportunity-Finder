@@ -146,37 +146,130 @@ def match_score(title, artist, song):
         score += min(5, len(parts))
     return score
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def apple_search(title, artist):
+    """Apple/iTunes public catalog lookup. No API key required."""
+    try:
+        q = f"{title} {artist}".strip()
+        r = requests.get(
+            "https://itunes.apple.com/search",
+            params={"term": q, "media": "music", "entity": "song", "limit": 10, "country": "US"},
+            headers={"User-Agent": UA}, timeout=10
+        )
+        r.raise_for_status()
+        data = r.json()
+        wanted_t = normalize(title)
+        wanted_a = normalize(artist)
+        best = None
+        best_score = 0
+        for item in data.get("results", []):
+            ts = normalize(item.get("trackName",""))
+            aa = normalize(item.get("artistName",""))
+            score = 0
+            if wanted_t and (wanted_t == ts or wanted_t in ts or ts in wanted_t): score += 70
+            if wanted_a and (wanted_a == aa or wanted_a in aa or aa in wanted_a): score += 30
+            if score > best_score:
+                best_score, best = score, item
+        if best_score >= 80:
+            return {"state":"MATCH", "detail":"MATCH FOUND", "url":best.get("trackViewUrl","")}
+        return {"state":"NO_MATCH", "detail":"NO MATCH", "url":""}
+    except Exception as e:
+        return {"state":"ERROR", "detail":"CHECK FAILED", "url":""}
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def spotify_search_public(title, artist):
+    """
+    Optional Spotify Web API check.
+    If credentials are not configured, do NOT guess or mark as no match.
+    """
+    client_id = st.secrets.get("SPOTIFY_CLIENT_ID", "")
+    client_secret = st.secrets.get("SPOTIFY_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        return {"state":"UNVERIFIED", "detail":"NOT CHECKED (API key not configured)", "url":""}
+    try:
+        token = requests.post(
+            "https://accounts.spotify.com/api/token",
+            headers={
+                "Authorization": "Basic " + base64.b64encode(
+                    f"{client_id}:{client_secret}".encode()
+                ).decode(),
+                "Content-Type":"application/x-www-form-urlencoded",
+            },
+            data={"grant_type":"client_credentials"},
+            timeout=10
+        )
+        token.raise_for_status()
+        access = token.json()["access_token"]
+        r = requests.get(
+            "https://api.spotify.com/v1/search",
+            headers={"Authorization":f"Bearer {access}"},
+            params={"q":f'track:"{title}" artist:"{artist}"', "type":"track", "limit":10, "market":"US"},
+            timeout=10
+        )
+        r.raise_for_status()
+        items = r.json().get("tracks",{}).get("items",[])
+        wanted_t, wanted_a = normalize(title), normalize(artist)
+        for item in items:
+            tt = normalize(item.get("name",""))
+            names = [normalize(x.get("name","")) for x in item.get("artists",[])]
+            if (wanted_t == tt or wanted_t in tt or tt in wanted_t) and any(
+                wanted_a == a or wanted_a in a or a in wanted_a for a in names
+            ):
+                return {"state":"MATCH","detail":"MATCH FOUND","url":item.get("external_urls",{}).get("spotify","")}
+        return {"state":"NO_MATCH","detail":"NO MATCH","url":""}
+    except Exception:
+        return {"state":"ERROR","detail":"CHECK FAILED","url":""}
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def youtube_music_public(title, artist):
+    """
+    Public web evidence for YouTube Music. This is deliberately conservative:
+    if the public page cannot be verified, return UNVERIFIED rather than
+    incorrectly saying the song is not distributed.
+    """
+    q = f'site:music.youtube.com "{title}" "{artist}"'
+    hits = web_search(q, 6)
+    wanted_t, wanted_a = normalize(title), normalize(artist)
+    for h in hits:
+        text = normalize(h.get("title","") + " " + h.get("snippet",""))
+        if wanted_t and wanted_t in text and (not wanted_a or wanted_a in text):
+            return {"state":"MATCH","detail":"MATCH FOUND","url":h["url"]}
+    if hits:
+        return {"state":"NO_MATCH","detail":"NO MATCH IN PUBLIC SEARCH","url":""}
+    return {"state":"UNVERIFIED","detail":"CHECK FAILED","url":""}
+
 def distribution_check(title, artist):
     """
-    Public-web evidence only. This does NOT prove ownership, licensing,
-    copyright clearance, or legal availability.
+    Conservative catalog checker:
+    - DISTRIBUTED only when at least one reliable catalog match is found.
+    - NOT DISTRIBUTION only when all enabled checks completed successfully and
+      none found a match.
+    - Otherwise CHECK UNVERIFIED, never a guessed negative.
     """
-    q = f'"{title}" "{artist}"'
-    queries = [
-        f'site:music.apple.com "{title}" "{artist}"',
-        f'site:open.spotify.com "{title}" "{artist}"',
-        f'site:music.youtube.com "{title}" "{artist}"',
-    ]
-    evidence = []
-    for q2 in queries:
-        hits = web_search(q2, 3)
-        evidence.extend(hits)
-    # Deduplicate
-    seen, clean = set(), []
-    for x in evidence:
-        u = x["url"]
-        if u and u not in seen:
-            seen.add(u); clean.append(x)
-    apple = any("music.apple.com" in x["url"] for x in clean)
-    spotify = any("open.spotify.com" in x["url"] for x in clean)
-    yt_music = any("music.youtube.com" in x["url"] for x in clean)
-    distributed = apple or spotify or yt_music
+    apple = apple_search(title, artist)
+    spotify = spotify_search_public(title, artist)
+    ytm = youtube_music_public(title, artist)
+
+    checks = [apple, spotify, ytm]
+    positive = [x for x in checks if x["state"] == "MATCH"]
+    enabled = [x for x in checks if x["state"] != "UNVERIFIED"]
+    failures = [x for x in checks if x["state"] == "ERROR"]
+    if positive:
+        status = "DISTRIBUTED / MATCH FOUND"
+    elif enabled and len(failures) == 0 and len(enabled) == len(checks):
+        status = "NOT DISTRIBUTION"
+    else:
+        status = "CHECK UNVERIFIED"
+
     return {
-        "status": "DISTRIBUTED / MATCH FOUND" if distributed else "NOT DISTRIBUTION",
-        "apple": "MATCH FOUND" if apple else "NO OBVIOUS MATCH",
-        "spotify": "LIKELY MATCH" if spotify else "NO OBVIOUS MATCH",
-        "youtube_music": "LIKELY MATCH" if yt_music else "NO OBVIOUS MATCH",
-        "evidence": clean[:10],
+        "status": status,
+        "apple": apple["detail"],
+        "spotify": spotify["detail"],
+        "youtube_music": ytm["detail"],
+        "apple_url": apple.get("url",""),
+        "spotify_url": spotify.get("url",""),
+        "youtube_music_url": ytm.get("url",""),
+        "evidence": [],
     }
 
 def render_result(row, check=True):
@@ -226,7 +319,7 @@ if mode == "🔥 Song Discovery":
     year = st.sidebar.number_input("Year / Old-song cutoff (0 = Any Year)", min_value=0, max_value=2100, value=0, step=1)
     noise = st.sidebar.checkbox("🚫 Hide remix/cover/reaction/movie noise", True)
     parallel = st.sidebar.slider("⚡ Parallel research", 1, 8, 4)
-    st.sidebar.caption("Public-search mode: no YouTube/Spotify API key required by default.")
+    st.sidebar.caption("YouTube + Apple checks work without keys. Spotify is checked only when optional Spotify credentials are configured; otherwise it is shown as UNVERIFIED, never as NOT DISTRIBUTION.")
 
     st.markdown("## 🔎 Viral Song Discovery")
     if song or artist:

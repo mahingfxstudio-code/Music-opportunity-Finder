@@ -2,6 +2,13 @@
 
 V1-style UI preserved, with a faster public-search workflow and stronger Song + Artist matching.
 
+## V2.1.1 catalog-check fix
+- Apple Music/iTunes uses the public Search API directly (no key).
+- Spotify is never guessed: it is checked only if optional `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` are configured.
+- YouTube Music public search is checked conservatively.
+- `CHECK UNVERIFIED` replaces false negative results when a check fails or is unavailable.
+- `NOT DISTRIBUTION` is only returned after all enabled checks complete successfully with no match.
+
 ## Main changes
 - V1-inspired dark UI
 - Exact Song Name + Singer/Artist inputs
