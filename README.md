@@ -1,33 +1,27 @@
-# Music Opportunity Finder V2.1
+# Music Opportunity Finder V1 — Updated
 
-V1-style UI preserved, with a faster public-search workflow and stronger Song + Artist matching.
+Fast V1-style music research web app with the original V1 UI preserved.
 
-## V2.1.1 catalog-check fix
-- Apple Music/iTunes uses the public Search API directly (no key).
-- Spotify is never guessed: it is checked only if optional `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` are configured.
-- YouTube Music public search is checked conservatively.
-- `CHECK UNVERIFIED` replaces false negative results when a check fails or is unavailable.
-- `NOT DISTRIBUTION` is only returned after all enabled checks complete successfully with no match.
+## Included
+- Original V1-style dark Research Center UI.
+- Fast parallel public YouTube search using `yt-dlp` — no YouTube API key required for the default workflow.
+- **CATALOG 1 — DISTRIBUTED / MATCH FOUND**
+- **CATALOG 2 — NOT DISTRIBUTION**
+- Song YouTube link, channel link, Spotify search, Apple Music, YouTube Music and lyrics-search links.
+- Artist Finder: searches an artist/singer and surfaces top/high-view matching songs.
+- Channel Scanner: reads a channel's videos directly and checks public catalog/distribution clues for the songs.
+- Lyrics Finder: Song Name required; Singer/Artist optional; Song Link optional; links to public lyric sources.
+- Any Year or numeric year/cutoff.
+- Any keyword, singer, channel, year or number can be typed into the search field.
+- Minimum/maximum views, result count, noise filtering and parallel-worker control.
+- CSV + JSON export.
+- Local research history.
 
-## Main changes
-- V1-inspired dark UI
-- Exact Song Name + Singer/Artist inputs
-- Multiple targeted YouTube searches
-- Public YouTube search via yt-dlp; no YouTube API key required by default
-- Two catalog buckets: `DISTRIBUTED / MATCH FOUND` and `NOT DISTRIBUTION`
-- Public evidence checks for Apple Music, Spotify and YouTube Music
-- Artist Finder
-- Channel Scanner
-- Lyrics Finder with song + artist + optional link
-- CSV export
-- Flexible Any-style filters
-- No database required
+## Important
+`NOT DISTRIBUTION` only means that the public checks used by this app did not show an obvious distribution/catalog match. It is **not** proof that a recording is unowned, copyright-free, or legally available for distribution. Verify master, publishing, label, licensing and ownership rights before using a song.
 
 ## Run
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-## Important
-Catalog status is only public-web evidence. A `NOT DISTRIBUTION` result does not prove a recording is unowned, copyright-free, or legally available for distribution. Always verify master, publishing, label, licensing and ownership rights.

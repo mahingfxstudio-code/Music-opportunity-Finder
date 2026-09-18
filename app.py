@@ -1,463 +1,320 @@
-
-import re
-import time
-from urllib.parse import quote_plus, urlparse
-
-import pandas as pd
-import requests
 import streamlit as st
-from bs4 import BeautifulSoup
+import pandas as pd
+import requests, re, sqlite3, html
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote_plus, urlparse
+from datetime import datetime, timezone
 
-try:
-    import yt_dlp
-except Exception:
-    yt_dlp = None
+st.set_page_config(page_title="Music Opportunity Finder V1", page_icon="🎵", layout="wide", initial_sidebar_state="expanded")
+DB = "music_finder_v1.db"
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/139 Safari/537.36"
 
-VERSION = "V2.1"
-APP_TITLE = f"🎵 Music Opportunity Finder {VERSION}"
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/140 Safari/537.36"
+# ---------- DB ----------
+def db():
+    c = sqlite3.connect(DB)
+    c.execute("""CREATE TABLE IF NOT EXISTS history(
+        id INTEGER PRIMARY KEY, title TEXT, artist TEXT, channel TEXT, video_id TEXT,
+        views INTEGER, published TEXT, catalog TEXT, checked_at TEXT)""")
+    c.commit(); return c
 
-st.set_page_config(page_title=APP_TITLE, page_icon="🎵", layout="wide")
+def save_history(rows):
+    if not rows: return
+    c = db()
+    for r in rows:
+        c.execute("INSERT INTO history(title,artist,channel,video_id,views,published,catalog,checked_at) VALUES(?,?,?,?,?,?,?,?)",
+                  (r.get("title",""),r.get("artist",""),r.get("channel",""),r.get("video_id",""),
+                   int(r.get("views",0)),r.get("published",""),r.get("catalog",""),datetime.now(timezone.utc).isoformat()))
+    c.commit(); c.close()
 
-# ---------- Styling: V1-inspired UI ----------
-st.markdown("""
-<style>
-.stApp { background: #0b0d12; color: #f5f7fb; }
-section[data-testid="stSidebar"] { background:#171923; }
-.block-container { max-width: 1180px; padding-top: 1.2rem; }
-.v1hero {
-    background: linear-gradient(110deg,#0d1422,#211d48);
-    border:1px solid #293653; border-radius:0 0 28px 28px;
-    padding:25px 30px; margin-bottom:24px;
-}
-.v1hero h1 { margin:0; font-size:38px; font-weight:800; }
-.v1hero .v { color:#8c69ff; }
-.sub { color:#b9c1d4; margin-top:12px; }
-.bigbtn button {
-    width:100%; height:52px; background:#ff4d52 !important;
-    color:white !important; border:0 !important; border-radius:9px !important;
-    font-weight:800 !important;
-}
-.card {
-    background:#101620; border:1px solid #2c3850; border-radius:13px;
-    padding:17px; min-height:105px;
-}
-.card .n { font-size:32px; font-weight:800; margin-top:4px; }
-.smallmuted { color:#8f99ad; font-size:13px; }
-.resultbox {
-    background:#0f141c; border:1px solid #303b51; border-radius:12px;
-    padding:15px; margin:9px 0;
-}
-.badge { display:inline-block; padding:4px 9px; border-radius:12px; font-size:12px; font-weight:800; }
-.dist { background:#193d2b; color:#6ff0a3; }
-.notdist { background:#4b2427; color:#ff9ba0; }
-.linkrow a { margin-right:10px; }
-</style>
-""", unsafe_allow_html=True)
+# ---------- helpers ----------
+def normalize(s):
+    s = (s or "").lower()
+    s = re.sub(r'[\[\(\{].*?[\]\)\}]', ' ', s)
+    s = re.sub(r'\b(official|video|audio|lyrics?|mv|hd|4k|full|song|music|visualizer|officially|presenting)\b', ' ', s)
+    s = re.sub(r'[^a-z0-9\u0980-\u09ff]+', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
 
-st.markdown(f"""
-<div class="v1hero">
-  <h1>🎵 Music Opportunity Finder <span class="v">{VERSION}</span></h1>
-  <div class="sub">Viral • Old • High-View • Artist • Channel • Lyrics • Public Catalog Research</div>
-</div>
-""", unsafe_allow_html=True)
+NOISE = re.compile(r'\b(remix|reaction|react|cover|karaoke|instrumental|slowed|reverb|speed ?up|mashup|jukebox|full movie|natok|drama|trailer|teaser|shorts?)\b', re.I)
 
-# ---------- Helpers ----------
-@st.cache_data(ttl=900, show_spinner=False)
+def parse_artist(title, channel=""):
+    t = re.sub(r'\[[^\]]+\]|\([^)]*\)', ' ', title or "")
+    parts = re.split(r'\s+[|–—-]\s+|\s+ft\.?\s+|\s+feat\.?\s+', t, flags=re.I)
+    if len(parts) > 1:
+        left = parts[0].strip()
+        if 1 <= len(left.split()) <= 8 and not NOISE.search(left): return left
+    return channel or "Unknown"
+
+# ---------- YouTube public search, no API key ----------
+@st.cache_data(ttl=180, show_spinner=False)
 def yt_search(query, limit=20):
-    """YouTube public search through yt-dlp; no API key required."""
-    if not yt_dlp:
-        return []
-    opts = {
-        "quiet": True, "skip_download": True, "extract_flat": True,
-        "noplaylist": False, "playlistend": max(1, min(int(limit), 50)),
-        "socket_timeout": 12, "retries": 1,
-        "user_agent": UA,
-    }
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
-        entries = (info or {}).get("entries") or []
-        out = []
-        for e in entries:
-            if not e:
-                continue
-            vid = e.get("id") or ""
-            url = e.get("webpage_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else "")
-            out.append({
-                "title": e.get("title") or "",
-                "channel": e.get("channel") or e.get("uploader") or "",
-                "channel_id": e.get("channel_id") or "",
-                "views": int(e.get("view_count") or 0),
-                "published": e.get("upload_date") or "",
-                "url": url,
-                "video_id": vid,
-            })
+        import yt_dlp
+        opts={"quiet":True,"no_warnings":True,"skip_download":True,"extract_flat":True,
+              "ignoreerrors":True,"socket_timeout":5,"retries":0,
+              "playlistend":min(max(int(limit),5),50),
+              "extractor_args":{"youtube":{"player_client":["web"]}}}
+        with yt_dlp.YoutubeDL(opts) as y:
+            info=y.extract_info(f"ytsearch{int(limit)}:{query}", download=False)
+        out=[]
+        for e in (info or {}).get("entries",[]) or []:
+            if not e or not e.get("id"): continue
+            vid=e.get("id")
+            out.append({"video_id":vid,"title":e.get("title") or "",
+                        "channel":e.get("channel") or e.get("uploader") or "",
+                        "views":int(e.get("view_count") or 0),
+                        "published":e.get("upload_date") or "",
+                        "artist":parse_artist(e.get("title") or "",e.get("channel") or e.get("uploader") or ""),
+                        "url":f"https://www.youtube.com/watch?v={vid}",
+                        "channel_url":e.get("channel_url") or e.get("uploader_url") or ""})
         return out
     except Exception:
         return []
 
-@st.cache_data(ttl=900, show_spinner=False)
-def web_search(query, limit=8):
-    """Public DuckDuckGo HTML search; no API key required."""
+@st.cache_data(ttl=180, show_spinner=False)
+def multi_search(keyword, limit):
+    qs=[keyword, f"{keyword} official song", f"{keyword} music video"]
+    per=max(5,min(30,int(limit//2)+4))
+    merged=[]; seen=set()
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs=[ex.submit(yt_search,q,per) for q in qs]
+        for f in as_completed(futs):
+            for r in f.result():
+                k=r["video_id"] or normalize(r["title"]+r["channel"])
+                if k not in seen: seen.add(k); merged.append(r)
+    return merged[:int(limit)]
+
+# ---------- direct channel scan ----------
+@st.cache_data(ttl=180, show_spinner=False)
+def channel_videos(channel_ref, limit=50):
+    """Pull videos directly from a YouTube channel. This avoids search-engine ambiguity."""
     try:
-        r = requests.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": UA},
-            timeout=12,
-        )
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        rows = []
-        for a in soup.select("a.result__a")[:limit]:
-            href = a.get("href", "")
-            title = a.get_text(" ", strip=True)
-            parent = a.find_parent(class_="result")
-            snippet = ""
-            if parent:
-                s = parent.select_one(".result__snippet")
-                snippet = s.get_text(" ", strip=True) if s else ""
-            rows.append({"title": title, "url": href, "snippet": snippet})
-        return rows
+        import yt_dlp
+        ref=channel_ref.strip()
+        if not ref.startswith("http"):
+            ref="https://www.youtube.com/@"+ref.lstrip("@")
+        opts={"quiet":True,"no_warnings":True,"skip_download":True,"extract_flat":True,
+              "ignoreerrors":True,"playlistend":min(max(int(limit),10),100),"socket_timeout":6,"retries":0}
+        with yt_dlp.YoutubeDL(opts) as y:
+            info=y.extract_info(ref+"/videos",download=False)
+        out=[]
+        for e in (info or {}).get("entries",[]) or []:
+            if not e or not e.get("id"): continue
+            vid=e["id"]; title=e.get("title") or ""
+            out.append({"video_id":vid,"title":title,
+                        "channel":e.get("channel") or e.get("uploader") or (ref.split("/")[-1]),
+                        "views":int(e.get("view_count") or 0),"published":e.get("upload_date") or "",
+                        "artist":parse_artist(title,e.get("channel") or e.get("uploader") or ""),
+                        "url":f"https://www.youtube.com/watch?v={vid}",
+                        "channel_url":e.get("channel_url") or e.get("uploader_url") or ref})
+        return out
     except Exception:
         return []
 
-def fmt_views(n):
+# ---------- public catalog clues ----------
+@st.cache_data(ttl=300, show_spinner=False)
+def apple_match(title, artist):
+    q=quote_plus(f"{title} {artist}")
     try:
-        n = int(n)
-    except Exception:
-        return "—"
-    if n >= 1_000_000_000: return f"{n/1e9:.1f}B"
-    if n >= 1_000_000: return f"{n/1e6:.1f}M"
-    if n >= 1_000: return f"{n/1e3:.1f}K"
-    return str(n)
+        r=requests.get(f"https://itunes.apple.com/search?term={q}&media=music&entity=song&limit=10",headers={"User-Agent":UA},timeout=4)
+        data=r.json(); nt,na=normalize(title),normalize(artist); hits=[]
+        for x in data.get("results",[]):
+            tt,aa=normalize(x.get("trackName","")),normalize(x.get("artistName",""))
+            score=(2 if nt and (nt==tt or nt in tt or tt in nt) else 0)+(2 if na and (na==aa or na in aa or aa in na) else 0)
+            if score: hits.append((score,x))
+        if hits:
+            hits.sort(key=lambda z:z[0],reverse=True); x=hits[0][1]
+            return True,f"{x.get('artistName','')} — {x.get('trackName','')}",x.get("trackViewUrl","")
+    except Exception: pass
+    return False,"No obvious Apple/iTunes match",f"https://music.apple.com/us/search?term={q}"
 
-def normalize(s):
-    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
-
-def match_score(title, artist, song):
-    t, a, s = normalize(title), normalize(artist), normalize(song)
-    score = 0
-    if s and s in t: score += 60
-    if a and a in t: score += 35
-    if s and a:
-        parts = set(s.split()) & set(t.split())
-        score += min(5, len(parts))
-    return score
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def apple_search(title, artist):
-    """Apple/iTunes public catalog lookup. No API key required."""
+@st.cache_data(ttl=300, show_spinner=False)
+def web_release_clues(title, artist):
+    """Fast public web check. Looks for public release/catalog pages; never treats absence as clearance."""
+    q=quote_plus(f'"{title}" "{artist}"')
+    urls=[
+        f"https://www.google.com/search?q={q}+Spotify",
+        f"https://www.google.com/search?q={q}+Apple+Music",
+        f"https://www.google.com/search?q={q}+music+distribution",
+    ]
+    # Lightweight request to Google is intentionally best-effort; the links are always returned.
+    text=""
     try:
-        q = f"{title} {artist}".strip()
-        r = requests.get(
-            "https://itunes.apple.com/search",
-            params={"term": q, "media": "music", "entity": "song", "limit": 10, "country": "US"},
-            headers={"User-Agent": UA}, timeout=10
-        )
-        r.raise_for_status()
-        data = r.json()
-        wanted_t = normalize(title)
-        wanted_a = normalize(artist)
-        best = None
-        best_score = 0
-        for item in data.get("results", []):
-            ts = normalize(item.get("trackName",""))
-            aa = normalize(item.get("artistName",""))
-            score = 0
-            if wanted_t and (wanted_t == ts or wanted_t in ts or ts in wanted_t): score += 70
-            if wanted_a and (wanted_a == aa or wanted_a in aa or aa in wanted_a): score += 30
-            if score > best_score:
-                best_score, best = score, item
-        if best_score >= 80:
-            return {"state":"MATCH", "detail":"MATCH FOUND", "url":best.get("trackViewUrl","")}
-        return {"state":"NO_MATCH", "detail":"NO MATCH", "url":""}
-    except Exception as e:
-        return {"state":"ERROR", "detail":"CHECK FAILED", "url":""}
+        rr=requests.get(urls[0],headers={"User-Agent":UA},timeout=3)
+        text=rr.text.lower()
+    except Exception: pass
+    hits=[]
+    for term in ["open.spotify.com","music.apple.com","spotify.com","music.youtube.com"]:
+        if term in text: hits.append(term)
+    return hits, urls
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def spotify_search_public(title, artist):
-    """
-    Optional Spotify Web API check.
-    If credentials are not configured, do NOT guess or mark as no match.
-    """
-    client_id = st.secrets.get("SPOTIFY_CLIENT_ID", "")
-    client_secret = st.secrets.get("SPOTIFY_CLIENT_SECRET", "")
-    if not client_id or not client_secret:
-        return {"state":"UNVERIFIED", "detail":"NOT CHECKED (API key not configured)", "url":""}
-    try:
-        token = requests.post(
-            "https://accounts.spotify.com/api/token",
-            headers={
-                "Authorization": "Basic " + base64.b64encode(
-                    f"{client_id}:{client_secret}".encode()
-                ).decode(),
-                "Content-Type":"application/x-www-form-urlencoded",
-            },
-            data={"grant_type":"client_credentials"},
-            timeout=10
-        )
-        token.raise_for_status()
-        access = token.json()["access_token"]
-        r = requests.get(
-            "https://api.spotify.com/v1/search",
-            headers={"Authorization":f"Bearer {access}"},
-            params={"q":f'track:"{title}" artist:"{artist}"', "type":"track", "limit":10, "market":"US"},
-            timeout=10
-        )
-        r.raise_for_status()
-        items = r.json().get("tracks",{}).get("items",[])
-        wanted_t, wanted_a = normalize(title), normalize(artist)
-        for item in items:
-            tt = normalize(item.get("name",""))
-            names = [normalize(x.get("name","")) for x in item.get("artists",[])]
-            if (wanted_t == tt or wanted_t in tt or tt in wanted_t) and any(
-                wanted_a == a or wanted_a in a or a in wanted_a for a in names
-            ):
-                return {"state":"MATCH","detail":"MATCH FOUND","url":item.get("external_urls",{}).get("spotify","")}
-        return {"state":"NO_MATCH","detail":"NO MATCH","url":""}
-    except Exception:
-        return {"state":"ERROR","detail":"CHECK FAILED","url":""}
+def check_one(r):
+    row=dict(r); title=row["title"]; artist=row.get("artist","")
+    am,ad,au=apple_match(title,artist)
+    clues,urls=web_release_clues(title,artist)
+    row.update({"apple_status":"MATCH FOUND" if am else "NO OBVIOUS MATCH","apple_detail":ad,"apple_url":au,
+                "web_clues":", ".join(clues) if clues else "No obvious public web catalog clue",
+                "spotify_url":f"https://open.spotify.com/search/{quote_plus(title+' '+artist)}",
+                "ytm_url":f"https://music.youtube.com/search?q={quote_plus(title+' '+artist)}",
+                "lyrics_url":f"https://www.google.com/search?q={quote_plus(title+' '+artist+' lyrics')}",
+                "google_url":urls[2]})
+    distributed=am or bool(clues)
+    row["catalog"]="DISTRIBUTED / MATCH FOUND" if distributed else "NOT DISTRIBUTION"
+    row["evidence"]=("Public catalog/web clue found — verify rights and exact recording" if distributed
+                      else "No obvious public catalog clue found in this check — verify master/publishing/label rights")
+    return row
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def youtube_music_public(title, artist):
-    """
-    Public web evidence for YouTube Music. This is deliberately conservative:
-    if the public page cannot be verified, return UNVERIFIED rather than
-    incorrectly saying the song is not distributed.
-    """
-    q = f'site:music.youtube.com "{title}" "{artist}"'
-    hits = web_search(q, 6)
-    wanted_t, wanted_a = normalize(title), normalize(artist)
-    for h in hits:
-        text = normalize(h.get("title","") + " " + h.get("snippet",""))
-        if wanted_t and wanted_t in text and (not wanted_a or wanted_a in text):
-            return {"state":"MATCH","detail":"MATCH FOUND","url":h["url"]}
-    if hits:
-        return {"state":"NO_MATCH","detail":"NO MATCH IN PUBLIC SEARCH","url":""}
-    return {"state":"UNVERIFIED","detail":"CHECK FAILED","url":""}
+def research_rows(rows,workers=8):
+    out=[]
+    with ThreadPoolExecutor(max_workers=int(workers)) as ex:
+        fs=[ex.submit(check_one,r) for r in rows]
+        for f in as_completed(fs):
+            try: out.append(f.result())
+            except Exception: pass
+    return out
 
-def distribution_check(title, artist):
-    """
-    Conservative catalog checker:
-    - DISTRIBUTED only when at least one reliable catalog match is found.
-    - NOT DISTRIBUTION only when all enabled checks completed successfully and
-      none found a match.
-    - Otherwise CHECK UNVERIFIED, never a guessed negative.
-    """
-    apple = apple_search(title, artist)
-    spotify = spotify_search_public(title, artist)
-    ytm = youtube_music_public(title, artist)
+def filter_rows(rows,min_views,max_views,year,hide_noise):
+    out=[]; seen=set(); cutoff=datetime.now().year-int(year) if int(year) else None
+    for r in rows:
+        k=r.get("video_id") or normalize(r.get("title","")+r.get("channel",""))
+        if k in seen: continue
+        seen.add(k)
+        if int(r.get("views",0))<int(min_views): continue
+        if int(max_views) and int(r.get("views",0))>int(max_views): continue
+        ds=str(r.get("published", ""))
+        if cutoff and re.match(r'^\d{8}$',ds) and int(ds[:4])>cutoff: continue
+        if hide_noise and NOISE.search(r.get("title","")): continue
+        out.append(r)
+    return sorted(out,key=lambda x:int(x.get("views",0)),reverse=True)
 
-    checks = [apple, spotify, ytm]
-    positive = [x for x in checks if x["state"] == "MATCH"]
-    enabled = [x for x in checks if x["state"] != "UNVERIFIED"]
-    failures = [x for x in checks if x["state"] == "ERROR"]
-    if positive:
-        status = "DISTRIBUTED / MATCH FOUND"
-    elif enabled and len(failures) == 0 and len(enabled) == len(checks):
-        status = "NOT DISTRIBUTION"
-    else:
-        status = "CHECK UNVERIFIED"
+# ---------- UI ----------
+st.markdown("""
+<style>
+:root{--bg:#090c14;--panel:#101521;--panel2:#151a27;--line:#283148;--muted:#9aa6bd;--accent:#7c5cff;--hot:#ff4d55}
+.block-container{padding-top:1.15rem;padding-bottom:3rem;max-width:1500px}
+[data-testid="stSidebar"]{background:#171923;border-right:1px solid #282d3a}
+[data-testid="stSidebar"] .block-container{padding:1.25rem 1rem}
+.hero{padding:26px 30px;border:1px solid #293550;border-radius:24px;background:radial-gradient(circle at 86% 12%,#25204b 0,#111625 42%,#0a0d15 82%);box-shadow:0 14px 40px rgba(0,0,0,.22);margin-bottom:22px}
+.hero h1{font-size:39px;line-height:1.1;margin:0;font-weight:850;letter-spacing:-.7px}.hero b{color:#8b70ff}.hero p{margin:8px 0 0;color:#aab4c9;font-size:15px}
+.section{font-size:26px;font-weight:820;margin:4px 0 14px;letter-spacing:-.3px}
+.search-card{padding:18px 20px;border:1px solid #283249;border-radius:20px;background:linear-gradient(180deg,#111622,#0d111b);margin-bottom:14px}
+.songbox{border:1px solid #293249;border-radius:16px;padding:14px 16px;background:#111621;margin:8px 0}
+.songtitle{font-size:18px;font-weight:800}.artist{color:#aeb8ca;margin-top:4px}.links{margin-top:8px;color:#b9c1d1}
+.metric-wrap{padding:14px 16px;border:1px solid #293249;border-radius:16px;background:#111621}
+.small-note{color:#8792aa;font-size:13px}
+div.stButton>button[kind="primary"]{border-radius:12px;font-weight:750;min-height:44px}
+[data-testid="stMetric"]{background:#111621;border:1px solid #293249;padding:10px 14px;border-radius:14px}
+.stDataFrame{border:1px solid #293249;border-radius:14px;overflow:hidden}
+</style>
+""",unsafe_allow_html=True)
+st.markdown('<div class="hero"><h1>🎵 Music Opportunity Finder <b>V1</b></h1><p>Viral • Old • High-View • Artist • Channel • Lyrics • Public Catalog Research</p></div>',unsafe_allow_html=True)
+st.markdown('<div class="section">🔎 Viral Song Discovery</div>',unsafe_allow_html=True)
 
-    return {
-        "status": status,
-        "apple": apple["detail"],
-        "spotify": spotify["detail"],
-        "youtube_music": ytm["detail"],
-        "apple_url": apple.get("url",""),
-        "spotify_url": spotify.get("url",""),
-        "youtube_music_url": ytm.get("url",""),
-        "evidence": [],
-    }
+with st.sidebar:
+    st.header("🎯 Research Center")
+    mode=st.radio("Research mode",["🔥 Song Discovery","🎤 Artist Finder","📺 Channel Scanner","📝 Lyrics Finder","📚 History"])
+    keyword=st.text_input("🔎 Search", "Bangla old viral song")
+    st.caption("Type any keyword, singer, channel, year or number.")
+    results=st.number_input("Results",5,100,30,5)
+    min_views=st.number_input("Minimum views",0,2_000_000_000,100000,10000)
+    max_views=st.number_input("Maximum views (0 = unlimited)",0,2_000_000_000,0,10000)
+    year=st.number_input("Year / Old-song cutoff (0 = Any Year)",0,100,0,1)
+    hide_noise=st.checkbox("🚫 Hide remix/cover/reaction/movie noise",True)
+    workers=st.slider("⚡ Parallel research",2,12,8)
+    st.divider(); st.caption("🔓 No YouTube/Spotify API key required for the default public-search workflow.")
+    st.caption("⚠️ Catalog 2 is only a public-search result, never proof that a song is free to distribute.")
 
-def render_result(row, check=True):
-    title = row.get("title","")
-    artist = row.get("artist") or row.get("channel") or ""
-    views = row.get("views", 0)
-    url = row.get("url","")
-    if check:
-        c = distribution_check(title, artist)
-    else:
-        c = {"status":"NOT CHECKED","apple":"—","spotify":"—","youtube_music":"—","evidence":[]}
-    badge_cls = "dist" if c["status"].startswith("DISTRIBUTED") else "notdist"
-    st.markdown(f"""
-    <div class="resultbox">
-      <div><b>🎵 {title}</b> <span class="badge {badge_cls}">{c["status"]}</span></div>
-      <div class="smallmuted">Artist: {artist} • Views: {fmt_views(views)}</div>
-      <div style="margin-top:7px">
-        Catalog: <b>{c["status"]}</b> &nbsp;|&nbsp;
-        Apple: <b>{c["apple"]}</b> &nbsp;|&nbsp;
-        Spotify: <b>{c["spotify"]}</b> &nbsp;|&nbsp;
-        YouTube Music: <b>{c["youtube_music"]}</b>
-      </div>
-      <div class="linkrow" style="margin-top:9px">
-        <a href="{url}" target="_blank">▶ YouTube</a>
-        <a href="https://www.google.com/search?q={quote_plus(title+' '+artist+' lyrics')}" target="_blank">📝 Lyrics Search</a>
-        <a href="https://www.google.com/search?q={quote_plus(title+' '+artist)}" target="_blank">🔎 Web Search</a>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+def linkline(r):
+    st.markdown(f"▶ [YouTube]({r.get('url','')})  •  🎧 [Spotify]({r.get('spotify_url','')})  •  🍎 [Apple Music]({r.get('apple_url','')})  •  🎼 [YouTube Music]({r.get('ytm_url','')})  •  📝 [Lyrics Search]({r.get('lyrics_url','')})")
+    if r.get("channel_url"): st.markdown(f"📺 [Channel]({r['channel_url']})")
 
-# ---------- Sidebar ----------
-st.sidebar.markdown("## 🎯 Research Center")
-mode = st.sidebar.radio(
-    "Research mode",
-    ["🔥 Song Discovery", "🔎 Artist Finder", "📺 Channel Scanner", "📝 Lyrics Finder", "📚 History"],
-    index=0,
-)
-st.sidebar.markdown("---")
+def render_catalog(df,name):
+    st.subheader(name)
+    if df.empty: st.info("No results in this catalog."); return
+    cols=["title","artist","channel","views","published","apple_status","web_clues"]
+    st.dataframe(df[[c for c in cols if c in df.columns]],use_container_width=True,hide_index=True)
+    for _,r in df.iterrows():
+        with st.expander(f"🎵 {r['title']} • {int(r.get('views',0)):,} views"):
+            st.write(f"**Artist:** {r.get('artist','')}  |  **Channel:** {r.get('channel','')}")
+            st.write(f"**Catalog:** {r.get('catalog','')}  |  **Apple:** {r.get('apple_status','')}  |  **Web:** {r.get('web_clues','')}")
+            st.caption(r.get('evidence',''))
+            linkline(r)
 
-if mode == "🔥 Song Discovery":
-    song = st.sidebar.text_input("Song name (optional)", placeholder="e.g. Kahani Suno")
-    artist = st.sidebar.text_input("Singer / Artist (optional)", placeholder="e.g. Kaifi Khalil")
-    keyword = st.sidebar.text_input("Keyword / genre / language", placeholder="Any keyword")
-    results_n = st.sidebar.number_input("Results", min_value=5, max_value=50, value=30, step=5)
-    min_views = st.sidebar.number_input("Minimum views", min_value=0, value=100000, step=10000)
-    max_views = st.sidebar.number_input("Maximum views (0 = unlimited)", min_value=0, value=0, step=10000)
-    year = st.sidebar.number_input("Year / Old-song cutoff (0 = Any Year)", min_value=0, max_value=2100, value=0, step=1)
-    noise = st.sidebar.checkbox("🚫 Hide remix/cover/reaction/movie noise", True)
-    parallel = st.sidebar.slider("⚡ Parallel research", 1, 8, 4)
-    st.sidebar.caption("YouTube + Apple checks work without keys. Spotify is checked only when optional Spotify credentials are configured; otherwise it is shown as UNVERIFIED, never as NOT DISTRIBUTION.")
+def show_two(checked):
+    df=pd.DataFrame(checked)
+    if df.empty: st.warning("No candidates."); return
+    c1=df[df.catalog=="DISTRIBUTED / MATCH FOUND"]; c2=df[df.catalog=="NOT DISTRIBUTION"]
+    a,b,c,d=st.columns(4); a.metric("🎵 Songs",len(df)); b.metric("📁 Distributed",len(c1)); c.metric("📁 Not Distribution",len(c2)); d.metric("🔥 1M+",int((df.views>=1_000_000).sum()))
+    st.warning("Catalog 2 means no obvious distribution match was found in the public checks used here. Verify ownership, master, publishing, label and licensing rights before distribution.")
+    render_catalog(c1,"📁 CATALOG 1 — DISTRIBUTED / MATCH FOUND")
+    render_catalog(c2,"📁 CATALOG 2 — NOT DISTRIBUTION")
+    st.divider(); x,y=st.columns(2)
+    x.download_button("⬇️ Download CSV",df.to_csv(index=False).encode("utf-8-sig"),"music_finder_v1.csv","text/csv")
+    y.download_button("⬇️ Download JSON",df.to_json(orient="records",force_ascii=False,indent=2).encode("utf-8"),"music_finder_v1.json","application/json")
+    save_history(checked)
 
-    st.markdown("## 🔎 Viral Song Discovery")
-    if song or artist:
-        search_text = f"{song} {artist}".strip()
-        hint = "Exact Song + Singer/Artist matching"
-    else:
-        search_text = keyword
-        hint = "Keyword / genre / language search"
-    st.caption(hint)
-    st.markdown('<div class="bigbtn">', unsafe_allow_html=True)
-    go = st.button("🚀 FAST FIND & RESEARCH SONGS", use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+# ---------- modes ----------
+if mode=="📚 History":
+    c=db(); h=pd.read_sql_query("SELECT * FROM history ORDER BY id DESC LIMIT 500",c); c.close()
+    st.subheader("📚 Research History"); st.dataframe(h,use_container_width=True,hide_index=True); st.stop()
 
-    if go:
-        if not search_text.strip():
-            st.warning("Enter a song name + artist, or a keyword.")
-            st.stop()
-        queries = []
-        if song and artist:
-            queries = [f'"{song}" "{artist}"', f'{song} {artist} official', f'{song} {artist} song']
-        elif song:
-            queries = [song, f'{song} official song']
+if mode=="📝 Lyrics Finder":
+    st.markdown('<div class="section">📝 Lyrics Finder</div>',unsafe_allow_html=True)
+    song=st.text_input("🎵 Song name",keyword if keyword else "")
+    artist=st.text_input("🎤 Singer / Artist name (optional)","")
+    song_link=st.text_input("🔗 Song link (optional)","")
+    if st.button("📝 Find Lyrics",type="primary",use_container_width=True):
+        if not song.strip(): st.warning("Song name is required.")
         else:
-            queries = [keyword, f'{keyword} official song', f'{keyword} music']
-        raw = []
-        for q in queries[:3]:
-            raw.extend(yt_search(q, int(results_n)))
-        seen = set(); rows=[]
-        for x in raw:
-            key = x["video_id"] or x["url"]
-            if key in seen: continue
-            seen.add(key)
-            if x["views"] < min_views: continue
-            if max_views and x["views"] > max_views: continue
-            if noise and any(k in x["title"].lower() for k in ["reaction","cover","remix","lyrics video","trailer"]):
-                continue
-            if song and artist:
-                x["score"] = match_score(x["title"], x["channel"], song)
-            else:
-                x["score"] = 0
-            x["artist"] = x["channel"]
-            rows.append(x)
-        rows.sort(key=lambda z: (z["score"], z["views"]), reverse=True)
-        rows = rows[:int(results_n)]
+            q=quote_plus((song+" "+artist).strip())
+            st.markdown(f'<div class="songbox"><div class="songtitle">🎵 {html.escape(song)}</div><div class="artist">🎤 {html.escape(artist) if artist else "Artist not provided"}</div></div>',unsafe_allow_html=True)
+            if song_link.strip(): st.markdown(f"🔗 **Song:** [{song_link}]({song_link})")
+            st.markdown("### Public lyric sources")
+            st.markdown(f"📝 [Google Lyrics Search](https://www.google.com/search?q={q}+lyrics)  •  [YouTube Lyrics Search](https://www.youtube.com/results?search_query={q}+lyrics)")
+            st.markdown(f"🎤 [Musixmatch](https://www.musixmatch.com/search/{q})  •  [Genius](https://genius.com/search?q={q})")
+            st.caption("The app links to public lyric sources rather than reproducing copyrighted lyrics.")
+    st.stop()
 
-        # Fast first: show YouTube candidates, then optional catalog checks
-        c1 = sum(1 for _ in rows)
-        checks = []
-        progress = st.progress(0)
-        for i, row in enumerate(rows):
-            try:
-                checks.append(distribution_check(row["title"], row["artist"]))
-            except Exception:
-                checks.append({"status":"NOT CHECKED","apple":"—","spotify":"—","youtube_music":"—","evidence":[]})
-            progress.progress((i+1)/max(1,len(rows)))
-        progress.empty()
+if mode=="🎤 Artist Finder":
+    st.markdown('<div class="section">🎤 Artist Finder — Top Songs</div>',unsafe_allow_html=True)
+    artist_name=st.text_input("Artist / Singer name",keyword)
+    if st.button("🔥 Find Artist Songs FAST",type="primary",use_container_width=True):
+        with st.spinner("⚡ Searching the artist in parallel…"):
+            rows=multi_search(f'"{artist_name}" song',int(results))
+        # Strong artist relevance filter before catalog checks
+        target=normalize(artist_name)
+        rows=[r for r in rows if target and (target in normalize(r.get("title","")) or target in normalize(r.get("artist","")) or target in normalize(r.get("channel","")))]
+        rows=filter_rows(rows,int(min_views),int(max_views),int(year),hide_noise)
+        if not rows: st.warning("No strong artist matches. Try the exact singer name, channel name, or lower Minimum views.")
+        else:
+            checked=research_rows(rows,int(workers)); show_two(checked)
+    st.stop()
 
-        distributed = sum(c["status"].startswith("DISTRIBUTED") for c in checks)
-        notdist = len(rows)-distributed
-        million = sum(r["views"] >= 1_000_000 for r in rows)
+if mode=="📺 Channel Scanner":
+    st.markdown('<div class="section">📺 Channel Scanner</div>',unsafe_allow_html=True)
+    channel_ref=st.text_input("YouTube channel URL / @handle / channel name",keyword)
+    st.caption("This mode pulls videos directly from the channel first, then checks whether each song has public release/catalog clues elsewhere.")
+    if st.button("📡 Scan Channel FAST",type="primary",use_container_width=True):
+        with st.spinner("⚡ Reading channel videos…"):
+            rows=channel_videos(channel_ref,int(results))
+        rows=filter_rows(rows,int(min_views),int(max_views),int(year),hide_noise)
+        if not rows:
+            st.error("Could not read the channel. Use the exact YouTube @handle or full channel URL.")
+        else:
+            checked=research_rows(rows,int(workers)); show_two(checked)
+            st.markdown('<div class="section">📺 Channel Song List</div>',unsafe_allow_html=True)
+            for r in checked:
+                st.markdown(f'<div class="songbox"><div class="songtitle">🎵 {html.escape(r["title"])}</div><div class="artist">🎤 {html.escape(r.get("artist", "Unknown"))} • {int(r.get("views",0)):,} views</div><div class="links">{r.get("catalog","")}</div></div>',unsafe_allow_html=True)
+                linkline(r)
+    st.stop()
 
-        cols = st.columns(4)
-        for col, label, value in zip(cols, ["🎵 Songs","📁 Distributed","📁 Not Distribution","🔥 1M+"], [len(rows),distributed,notdist,million]):
-            col.markdown(f'<div class="card"><div>{label}</div><div class="n">{value}</div></div>', unsafe_allow_html=True)
-
-        st.info("Catalog status is public-search evidence only. “NOT DISTRIBUTION” means no obvious match was found in the checked public sources; it is not proof that a song is unowned, copyright-free, or legally available to distribute.")
-
-        if rows:
-            df = pd.DataFrame([{
-                "title":r["title"],"artist":r["artist"],"channel":r["channel"],
-                "views":r["views"],"published":r["published"],"url":r["url"],
-                "catalog":checks[i]["status"],"apple":checks[i]["apple"],
-                "spotify":checks[i]["spotify"],"youtube_music":checks[i]["youtube_music"]
-            } for i,r in enumerate(rows)])
-            st.download_button("⬇️ Download CSV", df.to_csv(index=False).encode(), "music_opportunity_v2_1.csv", "text/csv")
-            for i, r in enumerate(rows):
-                c = checks[i]
-                render_result({**r, "artist":r["artist"]}, check=False)
-                st.caption(f"Catalog: {c['status']} • Apple: {c['apple']} • Spotify: {c['spotify']} • YouTube Music: {c['youtube_music']}")
-
-elif mode == "🔎 Artist Finder":
-    st.markdown("## 🔎 Artist Finder")
-    artist = st.text_input("Artist / Singer name", placeholder="Type any artist name")
-    n = st.number_input("Top songs to show", 5, 50, 20, 5)
-    if st.button("🔎 FIND ARTIST SONGS", use_container_width=True):
-        if not artist.strip(): st.warning("Enter an artist name."); st.stop()
-        rows = yt_search(f'"{artist}" official song', int(n))
-        rows = sorted(rows, key=lambda x:x["views"], reverse=True)
-        st.success(f"Found {len(rows)} public YouTube candidates for {artist}.")
-        for r in rows:
-            render_result({**r, "artist":artist}, check=True)
-
-elif mode == "📺 Channel Scanner":
-    st.markdown("## 📺 Channel Scanner")
-    channel_url = st.text_input("YouTube channel URL", placeholder="https://www.youtube.com/@ChannelName")
-    n = st.number_input("Songs to scan", 5, 30, 10, 5)
-    min_views = st.number_input("Minimum views", 0, 100_000_000_000, 0, 10000)
-    if st.button("📺 SCAN CHANNEL SONGS", use_container_width=True):
-        if not channel_url.strip():
-            st.warning("Enter a YouTube channel URL."); st.stop()
-        # Search by channel URL/name rather than downloading the whole channel.
-        handle = channel_url.rstrip("/").split("/")[-1].replace("@","")
-        rows = yt_search(f'@{handle} song', int(n)*2)
-        rows = [r for r in rows if r["views"] >= min_views]
-        rows = rows[:int(n)]
-        st.caption("Scanner checks public song candidates and looks for public catalog clues. It does not claim legal ownership status.")
-        for r in rows:
-            render_result({**r, "artist":r["channel"]}, check=True)
-
-elif mode == "📝 Lyrics Finder":
-    st.markdown("## 📝 Lyrics Finder")
-    song = st.text_input("Song name", placeholder="Type song name")
-    artist = st.text_input("Singer / Artist name (optional)", placeholder="Optional")
-    link = st.text_input("Song link (optional)", placeholder="https://youtube.com/watch?v=...")
-    if st.button("📝 FIND LYRICS & SOURCES", use_container_width=True):
-        if not song.strip():
-            st.warning("Enter song name."); st.stop()
-        q = f'"{song}" "{artist}" lyrics' if artist else f'"{song}" lyrics'
-        hits = web_search(q, 10)
-        st.success(f"Found {len(hits)} public lyric/search sources.")
-        for h in hits:
-            st.markdown(f"**[{h['title']}]({h['url']})**")
-            if h["snippet"]: st.caption(h["snippet"])
-        if link:
-            st.markdown(f"▶ [Open song link]({link})")
-        st.info("This finder returns public lyric/source links rather than reproducing copyrighted lyrics.")
-
-elif mode == "📚 History":
-    st.markdown("## 📚 History")
-    st.info("V2.1 keeps the app stateless on Streamlit Cloud. Add database-backed history later if you want persistent saved research.")
-    st.markdown("""
-    **Recommended next upgrade**
-    - Save searches/results
-    - Favorites / shortlist
-    - CSV + JSON export
-    - Re-scan saved channels
-    - Compare two research runs
-    """)
-
-st.markdown("---")
-st.caption(f"{APP_TITLE} • Public catalog research only • No API keys required by default")
+# song discovery
+if st.button("🚀 FAST FIND & RESEARCH SONGS",type="primary",use_container_width=True):
+    with st.spinner("⚡ Fast multi-search…"):
+        rows=multi_search(keyword,int(results))
+    rows=filter_rows(rows,int(min_views),int(max_views),int(year),hide_noise)
+    if not rows: st.warning("No candidates. Try Any Year / 0 and lower Minimum views."); st.stop()
+    with st.spinner("⚡ Parallel public catalog checks…"):
+        checked=research_rows(rows,int(workers))
+    show_two(checked)
+else:
+    st.info("Type any keyword, song, singer, channel, year or number and press FAST FIND & RESEARCH SONGS.")
