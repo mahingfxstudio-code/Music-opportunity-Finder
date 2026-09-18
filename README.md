@@ -1,14 +1,20 @@
-# Music Opportunity Finder V2
+# Music Opportunity Finder V2.1
 
-V1 UI preserved, with improved Song Discovery matching.
+V1-style UI preserved, with a faster public-search workflow and stronger Song + Artist matching.
 
-## V2 improvements
-- Exact **Song Name + Singer/Artist Name** search mode.
-- Multiple targeted YouTube queries for the pair.
-- Candidate relevance scoring prioritizes title + artist/channel agreement.
-- Distributed / NOT DISTRIBUTION two-catalog workflow retained.
-- Artist Finder, Channel Scanner, Lyrics Finder and History retained.
-- Public-search workflow does not require YouTube/Spotify API keys by default.
+## Main changes
+- V1-inspired dark UI
+- Exact Song Name + Singer/Artist inputs
+- Multiple targeted YouTube searches
+- Public YouTube search via yt-dlp; no YouTube API key required by default
+- Two catalog buckets: `DISTRIBUTED / MATCH FOUND` and `NOT DISTRIBUTION`
+- Public evidence checks for Apple Music, Spotify and YouTube Music
+- Artist Finder
+- Channel Scanner
+- Lyrics Finder with song + artist + optional link
+- CSV export
+- Flexible Any-style filters
+- No database required
 
 ## Run
 ```bash
@@ -16,4 +22,5 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Catalog status is public-search evidence only and is not legal rights clearance.
+## Important
+Catalog status is only public-web evidence. A `NOT DISTRIBUTION` result does not prove a recording is unowned, copyright-free, or legally available for distribution. Always verify master, publishing, label, licensing and ownership rights.
