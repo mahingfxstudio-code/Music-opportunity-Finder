@@ -1,27 +1,22 @@
-# Music Opportunity Finder V1 — Updated
+# Music Opportunity Finder V1.1
 
-Fast V1-style music research web app with the original V1 UI preserved.
+Updated from the V1 UI. The V1 visual layout and workflow are preserved.
 
-## Included
-- Original V1-style dark Research Center UI.
-- Fast parallel public YouTube search using `yt-dlp` — no YouTube API key required for the default workflow.
-- **CATALOG 1 — DISTRIBUTED / MATCH FOUND**
-- **CATALOG 2 — NOT DISTRIBUTION**
-- Song YouTube link, channel link, Spotify search, Apple Music, YouTube Music and lyrics-search links.
-- Artist Finder: searches an artist/singer and surfaces top/high-view matching songs.
-- Channel Scanner: reads a channel's videos directly and checks public catalog/distribution clues for the songs.
-- Lyrics Finder: Song Name required; Singer/Artist optional; Song Link optional; links to public lyric sources.
-- Any Year or numeric year/cutoff.
-- Any keyword, singer, channel, year or number can be typed into the search field.
-- Minimum/maximum views, result count, noise filtering and parallel-worker control.
-- CSV + JSON export.
-- Local research history.
+## Fixed
+- Stronger Song + Artist matching
+- Apple Music/iTunes direct public catalog check
+- Spotify public web search check (no Spotify app/SDK)
+- YouTube Music public web search check
+- `CHECK UNVERIFIED` when a public check fails
+- `NOT DISTRIBUTION` only after all three checks complete successfully with no obvious exact match
+- Parallel catalog checking for speed
+- Direct channel scanning using YouTube channel URL/@handle
+- Artist Finder, Lyrics Finder, History, CSV and JSON
+- Bengali Unicode-friendly normalization
+- No API key required for the default workflow
+
+## Deploy
+Replace `app.py` and `requirements.txt` in the GitHub repository and commit.
 
 ## Important
-`NOT DISTRIBUTION` only means that the public checks used by this app did not show an obvious distribution/catalog match. It is **not** proof that a recording is unowned, copyright-free, or legally available for distribution. Verify master, publishing, label, licensing and ownership rights before using a song.
-
-## Run
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+NOT DISTRIBUTION means only that the public catalog checks used by this app did not reveal an obvious exact match. It is not proof that a recording is copyright-free, unowned, or legally available for distribution. Verify master, composition, publishing, label, and licensing rights.
