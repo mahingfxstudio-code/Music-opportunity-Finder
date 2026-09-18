@@ -1,17 +1,27 @@
-# Music Opportunity Finder V2.1
+# Music Opportunity Finder V1 — Updated
 
-V1-style UI preserved with a safer and faster catalog-check workflow.
+Fast V1-style music research web app with the original V1 UI preserved.
 
-### Important fixes
-- Song + Singer/Artist matching is prioritized for better search accuracy.
-- Apple Music/iTunes public catalog check works without an API key.
-- Spotify is optional; if credentials are missing it is **UNVERIFIED**, never falsely marked as NOT DISTRIBUTION.
-- YouTube Music public evidence is conservative.
-- **NOT DISTRIBUTION** appears only after at least two independent public catalog checks complete with no match.
-- Failed/unavailable checks become **CHECK UNVERIFIED**, not a false negative.
-- Catalog checks run in parallel to reduce waiting time.
-- Counts now separate Distributed / Not Distribution / Unverified correctly.
-- V1-style dark/purple UI is retained.
+## Included
+- Original V1-style dark Research Center UI.
+- Fast parallel public YouTube search using `yt-dlp` — no YouTube API key required for the default workflow.
+- **CATALOG 1 — DISTRIBUTED / MATCH FOUND**
+- **CATALOG 2 — NOT DISTRIBUTION**
+- Song YouTube link, channel link, Spotify search, Apple Music, YouTube Music and lyrics-search links.
+- Artist Finder: searches an artist/singer and surfaces top/high-view matching songs.
+- Channel Scanner: reads a channel's videos directly and checks public catalog/distribution clues for the songs.
+- Lyrics Finder: Song Name required; Singer/Artist optional; Song Link optional; links to public lyric sources.
+- Any Year or numeric year/cutoff.
+- Any keyword, singer, channel, year or number can be typed into the search field.
+- Minimum/maximum views, result count, noise filtering and parallel-worker control.
+- CSV + JSON export.
+- Local research history.
 
-### Deploy
-Replace `app.py` and `requirements.txt` in your GitHub repository and commit the changes. Streamlit Community Cloud monitors the connected repository and normally reflects committed code changes automatically.
+## Important
+`NOT DISTRIBUTION` only means that the public checks used by this app did not show an obvious distribution/catalog match. It is **not** proof that a recording is unowned, copyright-free, or legally available for distribution. Verify master, publishing, label, licensing and ownership rights before using a song.
+
+## Run
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
